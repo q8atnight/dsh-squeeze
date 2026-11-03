@@ -1,0 +1,59 @@
+{
+  "name": "dsh-squeeze",
+  "version": "2.1.0",
+  "description": "Tool `squeeze` for DeepSeek Harness: reads long web pages, page batches and text files with a helper model you choose and returns only the answer, so the material never fills the chat.",
+  "type": "module",
+  "license": "MIT",
+  "author": "q8atnight",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/q8atnight/dsh-squeeze.git"
+  },
+  "homepage": "https://github.com/q8atnight/dsh-squeeze#readme",
+  "bugs": {
+    "url": "https://github.com/q8atnight/dsh-squeeze/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "tool",
+    "summarize",
+    "context"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg",
+    "README.md",
+    "LICENSE",
+    "vendor/*.js",
+    "vendor/LICENSE"
+  ],
+  "engines": {
+    "dsh": ">=0.2.1-rc.5"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-locale",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-plugin-manager",
+        "@deepseek-ai/dsh-api-remotes"
+      ]
+    }
+  }
+}

@@ -1,0 +1,4 @@
+- insert:
+    - id: dsh-squeeze
+      name: 'dsh-squeeze'
+      config: {}

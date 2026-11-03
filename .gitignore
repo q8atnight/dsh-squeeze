@@ -1,0 +1,5 @@
+node_modules/
+*.tgz
+.DS_Store
+# development-only comparison script (talks to a private machine)
+test/compare.mjs
