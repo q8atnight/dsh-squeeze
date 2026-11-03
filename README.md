@@ -1,13 +1,45 @@
+<p align="center"><img src="assets/icon-180.png" width="96" alt="squeeze icon"></p>
+
 # squeeze — read long material without filling the chat
 
 A plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) that adds one tool, `squeeze`.
 
-When an agent needs something from a long web page, a batch of pages or a big text file, it calls `squeeze` with a
-specific question. squeeze downloads or reads the material, hands it to a **helper model you choose**, and returns
-**only the answer**. The material never enters the main conversation, so the agent's context stays small and cheap.
+> 中文简介：`squeeze` 工具让 Agent 把长网页、多个网页、文本文件或 PDF 交给你选定的辅助模型阅读，只把答案带回对话，原文不占用上下文。
+
+When an agent needs something from a long web page, a batch of pages, a big text file or a PDF, it calls `squeeze`
+with a specific question. squeeze downloads or reads the material, hands it to a **helper model you choose**, and
+returns **only the answer**. The material never enters the main conversation, so the agent's context stays small and
+cheap.
 
 Typical uses: pull figures out of a long report, find one section in a large log or code file, compare a few web
 pages, summarise a transcript.
+
+## Example
+
+The agent asks about a 17,000-character government PDF. Only this comes back into the chat (a few hundred
+characters instead of the whole document):
+
+```
+squeeze  url: https://tax.gov.ae/…/Cabinet Decision No. 75 of 2023 and amendments - For Publishing.pdf
+         prompt: What penalty (AED) applies for failing to submit a corporate tax registration application on time?
+                 Quote the item number.
+
+Item 14 in the Table of Violations and Administrative Penalties: "Failure of the Taxable Person to submit a Tax
+Registration application within the timeframe specified by the Authority …" — penalty AED 10,000.
+(Footnote: added by Cabinet Decision No. 10 of 2024, effective 1 March 2024.)
+
+squeeze: ok | model quick (Qwen Flash Next) | 6.9s | source 16,856 chars | thinking medium
+```
+
+(A real call from 3 Nov 2026, answered by a local model; the answer is shortened here.)
+
+The status line tells the agent which model answered, how long it took and how big the source was. Failures say
+what went wrong and what to do next (for example `squeeze SOURCE PROBLEM: … this PDF has no text layer (probably a
+scan or photo) — it needs OCR`).
+
+## Settings page
+
+![squeeze settings page: two helper models with nicknames, thinking level and "when to use" notes, plus the fallback switch](assets/screenshot-settings.png)
 
 ## Features
 
@@ -101,6 +133,7 @@ squeeze: ok | model careful (GLM-5.3-Flash) | 41.2s | source 152,300 chars | thi
 - `client.js` — the settings page
 - `cordis.patch.yml` — switches the plugin on when the bundle is installed
 - `locale/en.json`, `icon.svg` — name, description and icon shown on the Plugins page
+- `assets/`, `screenshots.json` — README pictures and the screenshot list used by plugin storefronts
 - `test/` — offline checks: `ELECTRON_RUN_AS_NODE=1 "<DSH app binary>" --import ./test/hooks.mjs test/unit.mjs`
 
 ## Changes

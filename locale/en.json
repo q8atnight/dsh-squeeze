@@ -1,6 +1,6 @@
 {
   "meta": {
     "title": "squeeze",
-    "description": "Reads long web pages, page batches and text files with a helper model you choose and returns only the answer, so the material never fills the chat. Configure models, fallback and limits here."
+    "description": "Reads long web pages, page batches, text files and PDFs with a helper model you choose and returns only the answer, so the material never fills the chat. Configure models, fallback and limits here."
   }
 }
