@@ -4,7 +4,7 @@
 
 A plugin for [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) (DSH) that adds one tool, `squeeze`.
 
-> 中文简介：`squeeze` 工具让 Agent 把长网页、多个网页、文本文件或 PDF 交给你选定的辅助模型阅读，只把答案带回对话，原文不占用上下文。
+> 中文简介：`squeeze` 工具让 Agent 把长网页、多个网页、文本文件或 PDF 交给你选定的辅助模型阅读，只把答案带回对话，原文不占用上下文。注意：原文会发送给作答模型所属的提供方；开启回退（fallback）时，同一原文可能被发送给列表中另一提供方的模型。文件只通过 DSH 文件系统服务（ctx.fs）读取，被策略拒绝的路径一律拒绝（ACCESS DENIED）。
 
 When an agent needs something from a long web page, a batch of pages, a big text file or a PDF, it calls `squeeze`
 with a specific question. squeeze downloads or reads the material, hands it to a **helper model you choose**, and
@@ -55,7 +55,7 @@ scan or photo) — it needs OCR`).
   list, or is too small for the material is skipped and the next model in your list is tried. The answer's status
   line says which model answered and why the others were skipped. Time-outs do not fall back.
 - **Clear errors** — every failure starts with a kind the agent can act on (`REQUEST PROBLEM`, `SOURCE PROBLEM`,
-  `TOO BIG`, `MODEL UNAVAILABLE`, `NO ANSWER`, `TIMED OUT`, `CANCELLED`) and ends with the next step.
+  `TOO BIG`, `MODEL UNAVAILABLE`, `NO ANSWER`, `TIMED OUT`, `CANCELLED`, `ACCESS DENIED`) and ends with the next step.
 - **Batches of pages** — up to 20 addresses per call (configurable), downloaded four at a time; dead pages are
   skipped and listed instead of failing the whole call.
 - **PDFs** — PDF links and PDF files with a text layer are converted to text automatically when the free
@@ -124,8 +124,32 @@ squeeze: ok | model careful (GLM-5.3-Flash) | 41.2s | source 152,300 chars | thi
 - Size limits are estimates (characters → tokens). If a model still reports "too long", the call is reported as
   `TOO BIG` (or falls back, if fallback is on).
 - Answers come from a helper model: treat them as leads and check important figures against the source.
-- Privacy: the material is sent to whichever model answers. If you mix local and cloud models and switch fallback on,
-  material meant for a local model can end up with a cloud model when the local one is down.
+
+## Where your text goes (data flow)
+
+- **The full source text leaves this machine for the helper model.** For every call, the converted text of the page(s)
+  or file plus the agent's question is sent, through DSH's own model connection, to the **provider of the model that
+  answers** — exactly as if you had pasted it into a chat with that model. With a cloud provider, the provider's own
+  terms and retention apply. Only the answer comes back into the main conversation.
+- **Fallback can send it to a different provider.** With fallback on, if the chosen model is unreachable, errors, has
+  left the model list or is too small, the **same text is sent to the next model in your list**, which may belong to a
+  different provider (for example a cloud model after a local one). The status line under the answer names the model
+  that answered and lists the ones that were skipped. Keep fallback off, or list only models you trust with the
+  material, if that matters to you.
+- Web pages are downloaded by squeeze itself (from your machine, no proxy); nothing else is contacted. squeeze sends
+  no telemetry and stores no material — PDFs are converted in a temporary folder that is deleted right after.
+
+## File access and sandboxing
+
+- squeeze reads files **only through DSH's filesystem service** (`ctx.fs`) — the same path resolution and the same
+  service as the built-in `read` tool — so whatever filesystem/sandbox policy your DSH setup mounts applies to squeeze
+  too. It never opens a model-supplied path with Node's own file functions.
+- A refusal by that service is final: the call fails with `ACCESS DENIED`, nothing is sent to any model, and there is
+  no fallback route. (`test/unit.mjs` has regression tests for this: denied at path resolution, denied at read time,
+  denied PDF, and no filesystem service at all.)
+- Note: DSH's shipped sandbox (`dsh-fs-sandbox`, 0.2.1) fences writes and edits only — "every mode permits reading" — so
+  in a default setup squeeze can read the same files the `read` tool can, no more.
+- `pdftotext` only ever receives squeeze's own temporary copy of the bytes the filesystem service returned.
 
 ## Files
 
@@ -138,6 +162,9 @@ squeeze: ok | model careful (GLM-5.3-Flash) | 41.2s | source 152,300 chars | thi
 
 ## Changes
 
+- **2.1.1** (6 Nov 2026) — files are read through DSH's filesystem service (`ctx.fs`) instead of Node's `fs`, so the
+  host's filesystem policy applies; denials are reported as `ACCESS DENIED` (regression tests added); README documents
+  where the source text is sent and that fallback may send it to another provider.
 - **2.1.0** (3 Nov 2026) — PDF links and files are read (via `pdftotext`); sites with more than 16 KB of headers
   are read; batch pages download in parallel; downloads without a size header are capped too; over-long answers
   are cut at a line break with status `ANSWER CUT` (out-of-budget answers keep `ANSWER INCOMPLETE`); the queue is

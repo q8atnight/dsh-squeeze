@@ -2,7 +2,7 @@
 // Run: ELECTRON_RUN_AS_NODE=1 "/Applications/DeepSeek Harness.app/Contents/MacOS/DeepSeek Harness" --import ./test/hooks.mjs test/unit.mjs
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { createVolatile } from "@deepseek-ai/cosmokit";
@@ -67,9 +67,36 @@ function makeConfig(values) {
 	return parsed;
 }
 
+// Stand-in for DSH's filesystem service (ctx.fs), same method shapes as @deepseek-ai/dsh-fs-local:
+// resolve(path,{cwd,signal}) -> target, stat(target) -> {type,size}|undefined, readBytes(target,signal,max).
+// `deny` lists absolute paths the "policy" refuses; `virtual` serves files that do not exist on disk.
+const fsReads = [];
+function fakeFs({ deny = [], denyAt = "resolve", virtual = {} } = {}) {
+	const denied = (p) => Object.assign(new Error(`cannot read "${p}": file access denied`), { code: "FS_SANDBOX_DENIED" });
+	return {
+		async resolve(p, opts) {
+			const full = path.resolve(opts?.cwd ?? process.cwd(), p);
+			if (denyAt === "resolve" && deny.includes(full)) throw denied(full);
+			return { targetKey: full, displayPath: full };
+		},
+		async stat(t) {
+			if (t.targetKey in virtual) return { type: "file", size: Buffer.byteLength(virtual[t.targetKey]) };
+			try { const i = await stat(t.targetKey); return { type: i.isFile() ? "file" : "directory", size: i.size }; } catch { return undefined; }
+		},
+		async readBytes(t, _signal, max) {
+			if (deny.includes(t.targetKey)) throw denied(t.targetKey);
+			fsReads.push(t.targetKey);
+			const b = t.targetKey in virtual ? Buffer.from(virtual[t.targetKey]) : await readFile(t.targetKey);
+			if (b.length > max) throw Object.assign(new Error("too large"), { code: "FS_TOO_LARGE" });
+			return new Uint8Array(b);
+		},
+	};
+}
+
 function makeCtx(config, extra = {}) {
 	let registered;
 	const ctx = {
+		fs: "fs" in extra ? extra.fs : fakeFs(),
 		llm: fakeLlm(),
 		workingDirectory: { ensure: async () => process.cwd() },
 		tools: { register: (d) => { registered = d; } },
@@ -402,6 +429,56 @@ await test("batch keeps page order while downloading in parallel", async () => {
 await test("CJK text counts ~1 token per character", () => {
 	assert.equal(plugin.estimateTokens("中文测试"), 4);
 	assert.equal(plugin.estimateTokens("abcdefghij"), 4);
+});
+
+
+await test("files are read only through DSH's filesystem service (virtual file works)", async () => {
+	calls.length = 0;
+	const v = path.join(dir, "only-in-fs-service.txt");
+	const { tool } = makeCtx(makeConfig({ models: three }), { fs: fakeFs({ virtual: { [v]: "The secret word is HERON.\n".repeat(20) } }) });
+	await tool().execute({ prompt: "q", file: v }, exec());
+	assert.match(calls.at(-1).options.messages[0].content[0].text, /HERON/);
+});
+
+await test("REGRESSION: a path the filesystem policy denies stays denied (refused at resolve)", async () => {
+	calls.length = 0; fsReads.length = 0;
+	const real = path.join(dir, "notes.txt"); // exists and is readable on disk
+	const { tool } = makeCtx(makeConfig({ models: three }), { fs: fakeFs({ deny: [real] }) });
+	await assert.rejects(tool().execute({ prompt: "q", file: real }, exec()), /^Error: squeeze ACCESS DENIED: DSH's filesystem policy does not allow reading .*notes\.txt \(FS_SANDBOX_DENIED\)\. squeeze does not work around this/);
+	await assert.rejects(tool().execute({ prompt: "q", file_path: real }, exec()), /ACCESS DENIED/);
+	await assert.rejects(tool().execute({ prompt: "q", file: path.relative(process.cwd(), real) }, exec()), /ACCESS DENIED/);
+	assert.equal(calls.length, 0, "no model may see a denied file");
+	assert.equal(fsReads.length, 0);
+});
+
+await test("REGRESSION: a path denied at read time stays denied (no fallback read)", async () => {
+	calls.length = 0;
+	const real = path.join(dir, "notes.txt");
+	const { tool } = makeCtx(makeConfig({ models: three, fallback: true }), { fs: fakeFs({ deny: [real], denyAt: "read" }) });
+	await assert.rejects(tool().execute({ prompt: "q", file: real }, exec()), /ACCESS DENIED/);
+	assert.equal(calls.length, 0);
+});
+
+await test("REGRESSION: a denied PDF is not handed to pdftotext", async () => {
+	calls.length = 0;
+	const pdf = path.join(dir, "denied.pdf");
+	await writeFile(pdf, "%PDF-1.4 fake");
+	const { tool } = makeCtx(makeConfig({ models: three }), { fs: fakeFs({ deny: [pdf], denyAt: "read" }) });
+	await assert.rejects(tool().execute({ prompt: "q", file: pdf }, exec()), /ACCESS DENIED/);
+	assert.equal(calls.length, 0);
+});
+
+await test("no filesystem service -> files refused, never read directly", async () => {
+	calls.length = 0;
+	const { tool } = makeCtx(makeConfig({ models: three }), { fs: undefined });
+	await assert.rejects(tool().execute({ prompt: "q", file: path.join(dir, "notes.txt") }, exec()), /ACCESS DENIED: this DSH setup has no filesystem service/);
+	assert.equal(calls.length, 0);
+});
+
+await test("source does not import Node file-reading functions for model paths", async () => {
+	const src = await readFile(new URL("../index.js", import.meta.url), "utf8");
+	assert.doesNotMatch(src, /\b(readFile|readFileSync|createReadStream|openSync)\s*\(/);
+	assert.doesNotMatch(src, /import\s*\{[^}]*\b(readFile|stat|open)\b[^}]*\}\s*from\s*"node:fs/);
 });
 
 server.close();

@@ -1,6 +1,6 @@
 {
   "name": "dsh-squeeze",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "description": "Tool `squeeze` for DeepSeek Harness: reads long web pages, page batches, text files and PDFs with a helper model you choose and returns only the answer, so the material never fills the chat.",
   "type": "module",
   "license": "MIT",

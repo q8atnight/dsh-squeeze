@@ -17,7 +17,7 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { access, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdtemp, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import https from "node:https";
 import { homedir, tmpdir } from "node:os";
@@ -25,7 +25,7 @@ import path from "node:path";
 import z from "./vendor/schemastery.js";
 
 export const name = "dsh-squeeze";
-export const inject = ["tools", "workingDirectory", "llm"];
+export const inject = ["tools", "workingDirectory", "llm", "fs"];
 
 export const MAX_MODELS = 3;
 const NICKNAME = /^[a-z][a-z0-9-]{0,19}$/;
@@ -77,6 +77,7 @@ const KIND = {
 	noAnswer: "NO ANSWER", // model ran but produced nothing usable
 	timeout: "TIMED OUT",
 	cancelled: "CANCELLED",
+	denied: "ACCESS DENIED", // DSH's filesystem policy refused the path — final, no workaround
 };
 const err = (kind, message) => new SqueezeError(kind, message);
 
@@ -431,36 +432,74 @@ async function mapLimit(items, limit, fn) {
 	return out;
 }
 
+/** Error codes from DSH's filesystem service that mean "this path may not be read". */
+const FS_DENIED = /DENIED|FORBIDDEN|PERMISSION|EACCES|EPERM/i;
+
+/**
+ * Read one file through DSH's filesystem service (ctx.fs) — the same service and path resolution the
+ * built-in `read` tool uses — so whatever filesystem/sandbox policy the deployment mounts also applies
+ * here. squeeze never opens model-supplied paths with Node's fs directly, and a refusal is final:
+ * there is no fallback route.
+ */
 async function readTextFile(ctx, exec, file) {
-	let f = file.trim();
-	if (f === "~" || f.startsWith("~/") || f.startsWith("~\\")) f = path.join(homedir(), f.slice(1));
-	let cwd = process.cwd();
-	try {
-		cwd = await ctx.workingDirectory.ensure(exec.agent, exec.signal);
-	} catch {
-		/* keep process cwd */
+	const fs = ctx.fs;
+	if (!fs || typeof fs.resolve !== "function" || typeof fs.readBytes !== "function") {
+		throw err(KIND.denied, "this DSH setup has no filesystem service, so squeeze cannot read files here. Use `url`/`urls`, or read the file with the built-in tools.");
 	}
-	const full = path.resolve(cwd, f);
+	let f = file.trim();
+	if (f === "~" || f.startsWith("~/") || f.startsWith("~\\")) f = path.join(homedir(), f.slice(1)); // shorthand only; the fs service still decides
+	let cwd;
+	try {
+		cwd = exec.agent === undefined ? undefined : await ctx.workingDirectory.ensure(exec.agent, exec.signal);
+	} catch {
+		/* let the filesystem service use its own default directory */
+	}
+	const fsFail = (e, shown) => {
+		if (exec.signal?.aborted || e?.code === "FS_ABORTED") return err(KIND.cancelled, "the call was cancelled.");
+		const code = String(e?.code ?? "");
+		if (FS_DENIED.test(code)) return err(KIND.denied, `DSH's filesystem policy does not allow reading ${shown} (${code}). squeeze does not work around this — tell the user if the file is needed.`);
+		if (code === "FS_TOO_LARGE") return err(KIND.tooBig, `${shown} is far over any model's limit. Split it into parts and squeeze each part.`);
+		if (code === "FS_NOT_FOUND") return err(KIND.source, `file not found: ${shown}. Check the path (absolute, ~/..., or relative to the working directory).`);
+		return err(KIND.source, `${shown} could not be read (${code || e?.message || e}).`);
+	};
+	let target;
+	try {
+		target = await fs.resolve(f, { ...(cwd !== undefined ? { cwd } : {}), signal: exec.signal });
+	} catch (e) {
+		throw fsFail(e, f);
+	}
+	const shown = target.displayPath ?? f;
 	let info;
 	try {
-		info = await stat(full);
-	} catch {
-		throw err(KIND.source, `file not found: ${full}. Check the path (absolute, ~/..., or relative to the working directory).`);
+		info = await fs.stat(target, exec.signal);
+	} catch (e) {
+		throw fsFail(e, shown);
 	}
-	if (!info.isFile()) throw err(KIND.source, `not a file: ${full}. squeeze reads one file per call, not folders.`);
-	if (info.size === 0) throw err(KIND.source, `the file is empty: ${full}.`);
-	if (info.size > MAX_DOWNLOAD_BYTES * 2) throw err(KIND.tooBig, `the file is ${fmt(info.size)} bytes — far over any model's limit. Split it into parts and squeeze each part.`);
-	const buf = await readFile(full);
+	if (!info) throw err(KIND.source, `file not found: ${shown}. Check the path (absolute, ~/..., or relative to the working directory).`);
+	if (info.type !== "file") throw err(KIND.source, `not a file: ${shown}. squeeze reads one file per call, not folders.`);
+	if (info.size === 0) throw err(KIND.source, `the file is empty: ${shown}.`);
+	const cap = MAX_DOWNLOAD_BYTES * 2;
+	if (info.size > cap) throw err(KIND.tooBig, `the file is ${fmt(info.size)} bytes — far over any model's limit. Split it into parts and squeeze each part.`);
+	let bytes;
+	try {
+		bytes = await fs.readBytes(target, exec.signal, cap);
+	} catch (e) {
+		throw fsFail(e, shown);
+	}
+	const buf = Buffer.from(bytes.buffer ? new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength) : bytes);
+	const name = path.basename(shown);
+	if (buf.length === 0) throw err(KIND.source, `the file is empty: ${shown}.`);
 	if (isPdf("", buf)) {
+		// pdftotext only ever sees squeeze's own temporary copy of the bytes the fs service returned.
 		const pdf = await pdfToText(buf, exec.signal);
-		if (pdf.problem) throw err(KIND.source, `${path.basename(full)}: ${pdf.problem}.`);
-		return { text: pdf.text, label: full };
+		if (pdf.problem) throw err(KIND.source, `${name}: ${pdf.problem}.`);
+		return { text: pdf.text, label: shown };
 	}
 	if (buf.subarray(0, 8192).includes(0)) {
-		throw err(KIND.source, `${path.basename(full)} is not a text file (Excel, Word, image or similar). Convert it to text first, then squeeze the text file. Scans need OCR.`);
+		throw err(KIND.source, `${name} is not a text file (Excel, Word, image or similar). Convert it to text first, then squeeze the text file. Scans need OCR.`);
 	}
 	const raw = buf.toString("utf8").replace(/^\uFEFF/, "");
-	return { text: looksLikeHtml(raw) ? htmlToText(raw) : raw, label: full };
+	return { text: looksLikeHtml(raw) ? htmlToText(raw) : raw, label: shown };
 }
 
 // ---------- the helper's task ----------
